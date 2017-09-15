@@ -1,9 +1,10 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-import sys, datetime,argparse
+import sys, datetime,argparse,time
 import pymysql
 import pika
+from multiprocessing import Process;
 
 
 
@@ -26,12 +27,12 @@ class Binlog2sql(object):
         '''
         if not startFile:
             raise ValueError('lack of parameter,startFile.')
-
-        ramq_username = 'chang'   #指定远程rabbitmq的用户名密码
-        ramq_pwd = '111111'
-        self.user_pwd = pika.PlainCredentials(ramq_username, ramq_pwd)
-        s_conn = pika.BlockingConnection(pika.ConnectionParameters('192.168.3.200', credentials=self.user_pwd))#创建连接
-        self.chan = s_conn.channel()  #在连接上创建一个频道
+        self.ramq_ip = '192.168.3.200'
+        self.ramq_username = 'chang'   #指定远程rabbitmq的用户名密码
+        self.ramq_pwd = '111111'
+        self.user_pwd = pika.PlainCredentials(self.ramq_username, self.ramq_pwd)
+        self.s_conn = pika.BlockingConnection(pika.ConnectionParameters(self.ramq_ip,connection_attempts=3, credentials=self.user_pwd,heartbeat_interval=0))#创建连接
+        self.chan = self.s_conn.channel()  #在连接上创建一个频道
 
         self.connectionSettings = connectionSettings
         self.startFile = startFile
@@ -69,6 +70,10 @@ class Binlog2sql(object):
                 raise ValueError('need set server_id in mysql server %s:%s' % (self.connectionSettings['host'], self.connectionSettings['port']))
         finally:
             cur.close()
+    def data_events(self,timeout):
+        while True:
+            time.sleep(timeout)
+            self.s_conn.process_data_events()
 
     def process_binlog(self):
         stream = BinLogStreamReader(connection_settings=self.connectionSettings, server_id=self.serverId,
@@ -95,7 +100,6 @@ class Binlog2sql(object):
                                             body= '{0}$$binlogpos${1}-{2}'.format(sql,stream.log_file,str(stream.log_pos))) #生产者要发送的消息
             # if not (isinstance(binlogevent, RotateEvent) or isinstance(binlogevent, FormatDescriptionEvent)):
             #         lastPos = binlogevent.packet.log_pos
-
         self.s_conn.close()#当生产者发送完消息后，可选择关闭连接
         cur.close()
         stream.close()
@@ -243,12 +247,14 @@ def generate_sql_pattern(binlogevent, row=None, flashback=False, nopk=False):
 if __name__ == '__main__':
 
     args = command_line_args(sys.argv[1:])
-    print args
     connectionSettings = {'host':args.host, 'port':args.port, 'user':args.user, 'passwd':args.password}
     binlog2sql = Binlog2sql(connectionSettings=connectionSettings, startFile=args.startFile,
                             startPos=args.startPos, endFile='', endPos=0,
                             startTime='', stopTime='', only_schemas=args.databases,
                             only_tables=args.tables, nopk=False)
-    binlog2sql.process_binlog()
+    p = Process(target = binlog2sql.data_events, args = (5,))
+    p.start()
 
-    #python mysqlsender.py -h192.168.3.200 -P3306 -uchang -p111111 -dchang -ttest --start-file=mysql-bin.000023
+    binlog2sql.process_binlog()
+    p.join()
+    #python mysqlsender.py -h192.168.3.200 -P3306 -uchang -p111111 -dchang -ttest --start-file=mysql-bin.000026
